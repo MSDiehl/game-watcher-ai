@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import random
@@ -124,7 +125,6 @@ def summarize_memory(limit: int = 5) -> str:
     """
     lines = []
 
-    # 1) Death summary
     death_events = [ev for ev in MEMORY if ev.type == "death"]
     if death_events:
         total_deaths = len(death_events)
@@ -132,7 +132,6 @@ def summarize_memory(limit: int = 5) -> str:
         parts = [f"{cnt} to {cause}" for cause, cnt in causes.items()]
         lines.append(f"You died {total_deaths} times ({', '.join(parts)}).")
 
-    # 2) Damage taken summary
     hurt_events = [ev for ev in MEMORY if ev.type == "player_hurt"]
     if hurt_events:
         total_hurts = len(hurt_events)
@@ -140,14 +139,12 @@ def summarize_memory(limit: int = 5) -> str:
         parts = [f"{cnt} by {att}" for att, cnt in attackers.items()]
         lines.append(f"You took damage {total_hurts} times ({', '.join(parts)}).")
 
-    # 4) Friendly-fire summary
     friendly_events = [ev for ev in MEMORY if ev.type == "friendly_fire"]
     if friendly_events:
         entity_counts = Counter(ev.details.get("entity", "unknown") for ev in friendly_events)
         for entity, cnt in entity_counts.items():
             lines.append(f"You triggered friendly fire on {cnt}x {entity}.")
 
-    # Trim to most recent `limit` lines
     if len(lines) > limit:
         lines = lines[-limit:]
 
@@ -158,6 +155,7 @@ def summarize_memory(limit: int = 5) -> str:
 # ------------------------------------------------------------------------------
 # AI & TTS Worker
 # ------------------------------------------------------------------------------
+
 async def enqueue_meta(meta: dict):
     """
     Enqueue metadata for processing by the TTS worker.
@@ -194,27 +192,25 @@ async def _call_ai_and_tts(meta: dict):
     memory_summary = summarize_memory()
     query_emb = embedder.encode(current).tolist()
     results = collection.query(query_embeddings=[query_emb], n_results=5)["metadatas"][0]
-    mem_texts = [f"{m['timestamp']}: {m}" for m in results]
-    prompt = (
-        "SYSTEM:\n"
-        "You are a Minecraft coach with a dynamic personality. Sometimes you’re sarcastic and furious, sometimes somewhat nice... choose your tone based on the situation.  \n"
-        "- Always address the player as “you.” Never call out their username.  \n"
-        "- Tone guidelines:\n"
-        "    • Be furious/sarcastic only when context demands (e.g., repeated failures or harms).\n"
-        "    • Be upbeat or neutral for positive or routine events.\n"
-        "- Vocabulary: Heavy profanity OK (FUCK, SHIT, DAMN).  \n"
-        "- Emphasis: use ALL-CAPS, exclamation points for shouting, ellipses (…) and dashes (—) for dramatic pauses.\n"
-        "- May wrap a single word or phrase in <emphasis level=\"strong\">…</emphasis> if needed.\n"
-        "- Feel free to rant for 1-2 sentences when appropriate.\n\n"
+    system_prompt = (
+        "You are a sarcastic, very annoyed Minecraft coach who adjusts tone based on context: annoyed/fake-supportive for good or routine events, furious/angry for repeated mistakes or harm.  \n"
+        "Always say “you” (never the username).  \n"
+        "Profanity allowed (FUCK, SHIT, DAMN).  \n"
+        "Use ALL-CAPS, !!!, …, and — for emphasis; may wrap key words in <emphasis level='strong'>…</emphasis>.  \n"
+        "Occasionally rant 1-2 sentences if it fits.  \n"
+    )
+    user_prompt = (        
         f"MEMORY SUMMARY:\n{memory_summary}\n\n"
         f"NEW EVENT: {current}\n\n"
         f"CURRENT PLAYER CONTEXT:\n{player_state}\n\n"
-        "INSTRUCTIONS: React in an appropriate tone—anger only if context demands but always be slightly annoyed; otherwise adjust tone. Do NOT include extra explanations—just the reaction.\n"
     )
-    print(f"[AI] Prompt:\n{prompt}")
+    print(f"[AI] Prompt:\n{user_prompt}")
     resp = openai.chat.completions.create(
         model="gpt-4o",
-        messages=[{"role": "system", "content": prompt}],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+            ],
         max_tokens=120,
         temperature=1.0
     )
@@ -235,25 +231,17 @@ def on_player_hurt(idx: int, ev: dict):
     """
     if ev.get("type") != "player_hurt":
         return None
-
     src = ev.get("damage_type", "unknown")
-    # 1) record the hit
     HIT_TOTALS[src] += 1
     total = HIT_TOTALS[src]
-
-    # 2) check if we've crossed our next alert threshold
     if total >= NEXT_ALERT[src]:
-        # prepare the event
         meta = {
             "event":    "struggling",
             "attacker": src,
             "hits":     total
         }
-        # bump the threshold for next time (e.g. double it)
         NEXT_ALERT[src] *= 2
         return meta
-
-    # otherwise, no event right now
     return None
 
 def on_player_death(idx: int, ev: dict):
@@ -337,8 +325,8 @@ def on_special_item_pickup(idx: int, ev: dict):
         return None
     SPECIAL_PICKUP_STATE[item] = 0
     return {
-        "event":    "item_collected",
-        "item":     item,
+        "event": "item_collected",
+        "item": item,
         "category": cfg["category"],
         "threshold": cfg["threshold"]
     }
