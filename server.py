@@ -1,8 +1,14 @@
+import regex as re
 import json
 import random
 import asyncio
+import threading
 import os, io, time
 import boto3
+import asyncio, os, json, base64, subprocess
+import numpy as np
+import websockets
+import sounddevice as sd
 from botocore.config import Config
 from mss import mss
 from PIL import Image
@@ -16,6 +22,7 @@ from elevenlabs import ElevenLabs, play
 from dotenv import load_dotenv
 from chromadb import PersistentClient
 from sentence_transformers import SentenceTransformer
+import sys
 
 # ------------------------------------------------------------------------------
 # Configuration & Constants
@@ -26,6 +33,24 @@ load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 tts = ElevenLabs(api_key=os.getenv("ELEVENLABS_API_KEY"))
 VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
+ELEVEN_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+ELEVEN_MODEL = os.getenv("ELEVENLABS_MODEL_ID", "eleven_turbo_v2_5")
+SENT_END = re.compile(r'(?<!\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|No|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec))(?<=[\.!\?…])\s+$')
+
+# ---- debug controls ----
+USE_PCM_DEBUG = False
+LOG_CHUNKS = False
+
+# PCM path (no ffmpeg)
+PCM_RATE = 16000
+PCM_CHANNELS = 1
+PCM_DTYPE = "int16"
+
+# MP3 path (hi-fi via ffmpeg)
+MP3_RATE = 44100
+MP3_CHANNELS = 1
+MP3_DTYPE = "int16"
+MP3_BITRATE_FMT = "mp3_44100_192"
 
 # AWS
 S3_BUCKET = os.getenv("GW_S3_BUCKET")
@@ -36,7 +61,7 @@ s3 = boto3.client(
     region_name=AWS_REGION,
     config=Config(
         signature_version="s3v4",
-        s3={"addressing_style": "virtual"}  # ensures bucketname.s3.<region>.amazonaws.com
+        s3={"addressing_style": "virtual"}
     ),
 )
 
@@ -105,7 +130,6 @@ def adjust_tilt(player_id, delta):
     return TILT_STATE[player_id]
 
 # Heartbeat settings
-# Heartbeat control
 heartbeat_reset = asyncio.Event()
 HEARTBEAT_MIN = 60   # 1 minute
 HEARTBEAT_MAX = 180  # 3 minutes
@@ -129,8 +153,6 @@ app = FastAPI()
 # ------------------------------------------------------------------------------
 # Memory Management
 # ------------------------------------------------------------------------------
-
-# 2) Harden metadata builders
 
 def _to_meta_primitive(val, max_len=2000):
     """Return a Chroma-safe primitive; stringify non-primitives; never return None."""
@@ -164,22 +186,24 @@ def _build_safe_metadata(details: dict, now: float) -> dict:
     return md
 
 def record_memory(ev_type: str, **details):
-    mem_type = details.get("event", ev_type)
     now = time.time()
+    mem_type = details.get("event", ev_type)
     text = f"{mem_type}: " + json.dumps(details, separators=(",", ":"), ensure_ascii=False)
     MEMORY.append(MemoryEvent(now, mem_type, details))
     cutoff = now - MEMORY_WINDOW
     while MEMORY and MEMORY[0].timestamp < cutoff:
         MEMORY.popleft()
     print(f"[Memory] Recorded {mem_type} {details}. Memory size = {len(MEMORY)}")
-    embedding = embedder.encode(text).tolist()
-    safe_meta = _build_safe_metadata(details, now)
 
-    collection.add(
-        documents=[text],
-        ids=[str(now)],
-        embeddings=[embedding],
-        metadatas=[safe_meta],
+    asyncio.create_task(_embed_later(text, details, now))
+
+async def _embed_later(text: str, details: dict, now: float):
+    safe_meta = _build_safe_metadata(details, now)
+    embedding = await asyncio.to_thread(embedder.encode, text)
+    embedding = embedding.tolist()
+    await asyncio.to_thread(
+        collection.add,
+        [text], [str(now)], [embedding], [safe_meta]
     )
 
 def summarize_memory(limit: int = 5) -> str:
@@ -218,10 +242,479 @@ def summarize_memory(limit: int = 5) -> str:
     summary = "\n".join(f"- {l}" for l in lines) if lines else "- Nothing memorable yet."
     print(f"[Memory] Summary:\n{summary}")
     return summary
+# ------------------------------------------------------------------------------
+# TTS Budget
+# ------------------------------------------------------------------------------
+
+LAST_LONG: dict[tuple[str, str], float] = {}   # (player_id, event_type) -> last_long_ts
+
+def allow_long(player_id: str, event_type: str, now: float, cooldown=45.0) -> bool:
+    key = (player_id, event_type)
+    last = LAST_LONG.get(key, 0.0)
+    ok = (now - last) >= cooldown
+    if ok:
+        LAST_LONG[key] = now
+    return ok
+
+def chars_for_seconds(seconds: float, tts_speed=0.92):
+    base_rate = 14.0
+    return int(seconds * base_rate * (1.0 / tts_speed))
+
+# Map base budgets by event (tweak to taste)
+_EVENT_BASE = {
+    "chat_message": (110, 4),   # (tokens, seconds)
+    "item_collected": (110, 4),
+    "friendly_fire": (140, 6),
+    "struggling": (200, 8),
+    "death": (200, 8),
+    "boss_spawn": (220, 10),
+}
+_DEFAULT_BASE = (180, 6)
+
+def _tilt_multiplier(tilt: int, max_tilt: int = MAX_TILT,
+                     min_mult: float = 1.0, max_mult: float = 1.8) -> float:
+    """Map 0..MAX_TILT -> [min_mult .. max_mult] (linear)."""
+    t = max(0, min(tilt, max_tilt))
+    if max_tilt == 0: 
+        return min_mult
+    return min_mult + (max_mult - min_mult) * (t / max_tilt)
+
+def decide_speech_budget(event_type: str, player_id: str,
+                         now: float | None = None) -> tuple[int, int]:
+    """
+    Returns (max_tokens, max_chars) for OpenAI stream and TTS cap,
+    scaled by the player's tilt. 'Long' budget allowed per-player per-event with cooldown.
+    """
+    import time
+    if now is None:
+        now = time.time()
+    base_tokens, base_secs = _EVENT_BASE.get(event_type, _DEFAULT_BASE)
+    tilt = TILT_STATE.get(player_id, 0)
+    mult = _tilt_multiplier(tilt)
+    tok = int(base_tokens * mult)
+    secs = base_secs * mult
+    high_tilt = tilt >= int(0.6 * MAX_TILT)
+    noteworthy = event_type in {"death", "struggling", "boss_spawn"}
+    if (noteworthy or high_tilt) and allow_long(player_id, event_type, now):
+        tok = max(tok, int(240 * mult))
+        secs = max(secs, 10.0 * mult)
+    tok = min(tok, 320)
+    secs = min(secs, 15.0)
+    max_chars = chars_for_seconds(secs)
+    return tok, max_chars
+
+async def soft_cap_stream(text_iter, hard_cap_chars: int, overflow_chars: int = 160):
+    """
+    Yields chunks from text_iter, but never ends mid-sentence.
+    - hard_cap_chars: target cap
+    - overflow_chars: how many extra chars we allow to finish the current sentence
+    """
+    sent = 0
+    buffer = ""
+    async for piece in text_iter:
+        piece = (piece or "").strip()
+        if not piece:
+            continue
+        if sent + len(piece) <= hard_cap_chars:
+            yield piece
+            sent += len(piece)
+            continue
+        buffer += (" " if buffer else "") + piece
+        if len(buffer) <= overflow_chars:
+            if SENT_END.search(buffer + " "):
+                cut = buffer.strip()
+                if not re.search(r'[\.!\?…]$', cut):
+                    cut += "."
+                yield cut
+                return
+            else:
+                continue
+        cut = buffer[: max(0, hard_cap_chars - sent)].rstrip()
+        if not re.search(r'[\.!\?…]$', cut):
+            cut += "."
+        if cut:
+            yield cut
+        return
+    if buffer:
+        cut = buffer.strip()
+        if not re.search(r'[\.!\?…]$', cut):
+            cut += "."
+        yield cut
 
 # ------------------------------------------------------------------------------
 # AI & TTS Worker
 # ------------------------------------------------------------------------------
+
+def _start_ffmpeg_decoder():
+    return subprocess.Popen(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-fflags", "+nobuffer", "-flags", "low_delay",
+            "-probesize", "32", "-analyzeduration", "0",
+            "-f", "mp3", "-i", "pipe:0",
+            "-vn",
+            "-f", "s16le", "-acodec", "pcm_s16le",
+            "-ac", "1", "-ar", str(MP3_RATE),
+            "pipe:1",
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0
+    )
+
+async def _mp3_play_via_ffmpeg(ws, ff, LOG_CHUNKS: bool):
+    """
+    Wire up:
+      WS -> (mp3 chunks) -> ff.stdin
+      ff.stdout -> (thread) -> asyncio.Queue -> sounddevice
+    Shutdown cleanly on isFinal/close.
+    """
+    loop = asyncio.get_running_loop()
+    pcm_q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=32)
+    received_audio_bytes = 0
+
+    def _stdout_reader():
+        try:
+            while True:
+                chunk = ff.stdout.read(16384)
+                if not chunk:
+                    break
+                try:
+                    pcm_q.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    try:
+                        _ = pcm_q.get_nowait()
+                    except Exception:
+                        pass
+                    pcm_q.put_nowait(chunk)
+        finally:
+            try:
+                pcm_q.put_nowait(None)
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_stdout_reader, daemon=True)
+    t.start()
+
+    async def _player():
+        with sd.OutputStream(samplerate=MP3_RATE, channels=MP3_CHANNELS, dtype=MP3_DTYPE) as out:
+            while True:
+                pcm = await pcm_q.get()
+                if pcm is None:
+                    break
+                if pcm:
+                    frames = np.frombuffer(pcm, dtype=np.int16)
+                    if frames.size:
+                        out.write(frames.reshape(-1, MP3_CHANNELS))
+    player_task = asyncio.create_task(_player())
+    is_final = False
+    try:
+        while True:
+            msg = await ws.recv()
+            data = json.loads(msg)
+            if "audio" in data:
+                b64 = data["audio"]
+                if isinstance(b64, str) and b64:
+                    mp3 = base64.b64decode(b64)
+                    received_audio_bytes += len(mp3)
+                    if LOG_CHUNKS:
+                        print(f"[TTS] got MP3 bytes: {len(mp3)} (total {received_audio_bytes})")
+                    try:
+                        ff.stdin.write(mp3)
+                        ff.stdin.flush()
+                    except (BrokenPipeError, ValueError, OSError) as e:
+                        if LOG_CHUNKS:
+                            print(f"[TTS] ffmpeg stdin write aborted: {e}")
+                        break
+                else:
+                    if LOG_CHUNKS:
+                        print("[TTS] got MP3 placeholder (no audio)")
+            elif "error" in data:
+                print(f"[TTS] server ERROR: {data['error']}", file=sys.stderr)
+            elif "message" in data:
+                if LOG_CHUNKS:
+                    print(f"[TTS] server msg: {data['message']}")
+            if data.get("isFinal"):
+                if LOG_CHUNKS:
+                    print("[TTS] isFinal received")
+                is_final = True
+                break
+    except (websockets.ConnectionClosedOK, websockets.ConnectionClosedError):
+        pass
+    except Exception as e:
+        print(f"[TTS] WS reader (MP3) exception: {e}", file=sys.stderr)
+    try:
+        ff.stdin.close()
+    except Exception:
+        pass
+    await player_task
+
+_TTS_LOCK = asyncio.Lock()
+
+async def tts_ws_stream(text_iter):
+    assert ELEVEN_API_KEY and VOICE_ID, "Missing ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID"
+
+    async with _TTS_LOCK:
+        uri = (
+            f"wss://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream-input"
+            f"?model_id={ELEVEN_MODEL}"
+            f"&output_format={'pcm_16000' if USE_PCM_DEBUG else 'mp3_44100_128'}"
+            f"&auto_mode=true"
+        )
+        print(f"[TTS] Connecting WS voice={VOICE_ID} model={ELEVEN_MODEL} pcm_debug={USE_PCM_DEBUG}")
+        ff = None
+        if not USE_PCM_DEBUG:
+            ff = _start_ffmpeg_decoder()
+            assert ff.stdin and ff.stdout
+        ws_done = asyncio.Event()
+        writer_done = asyncio.Event()
+        decoder_done = asyncio.Event()
+        sent_first = False
+        pieces_count = 0
+        sent_chars = 0
+        received_audio_bytes = 0
+        async with websockets.connect(uri, max_size=None) as ws:
+            init_msg = {
+                "text": " ",
+                "voice_settings": {
+                    "stability": 0.65,
+                    "similarity_boost": 0.9,
+                    "use_speaker_boost": True,
+                    "speed": 0.92,
+                },
+                "generation_config": {"chunk_length_schedule": [160, 220, 260, 300]},
+                "xi_api_key": ELEVEN_API_KEY,
+            }
+            await ws.send(json.dumps(init_msg))
+            print("[TTS] Sent init")
+            async def ws_reader_pcm():
+                nonlocal received_audio_bytes
+                try:
+                    with sd.OutputStream(samplerate=PCM_RATE, channels=1, dtype="int16") as out:
+                        while True:
+                            msg = await ws.recv()
+                            data = json.loads(msg)
+
+                            if "audio" in data:
+                                b64 = data["audio"]
+                                if isinstance(b64, str) and b64:
+                                    pcm = base64.b64decode(b64)
+                                    received_audio_bytes += len(pcm)
+                                    if LOG_CHUNKS:
+                                        print(f"[TTS] got PCM bytes: {len(pcm)} (total {received_audio_bytes})")
+                                    frames = np.frombuffer(pcm, dtype=np.int16)
+                                    if frames.size:
+                                        out.write(frames.reshape(-1, 1))
+                                else:
+                                    if LOG_CHUNKS:
+                                        print("[TTS] got PCM placeholder (no audio)")
+                            elif "error" in data:
+                                print(f"[TTS] server ERROR: {data['error']}", file=sys.stderr)
+                            elif "message" in data:
+                                if LOG_CHUNKS: print(f"[TTS] server msg: {data['message']}")
+
+                            if data.get("isFinal"):
+                                if LOG_CHUNKS: print("[TTS] isFinal received")
+                                break
+                except (websockets.ConnectionClosedOK, websockets.ConnectionClosedError):
+                    pass
+                except Exception as e:
+                    print(f"[TTS] WS reader (PCM) exception: {e}", file=sys.stderr)
+                finally:
+                    ws_done.set()
+            async def ws_reader_mp3():
+                nonlocal received_audio_bytes
+                pcm_buf = bytearray()
+                buf_lock = threading.Lock()
+                eof = threading.Event()
+                def _stdout_reader():
+                    try:
+                        while True:
+                            chunk = ff.stdout.read(32768)
+                            if not chunk:
+                                break
+                            with buf_lock:
+                                pcm_buf.extend(chunk)
+                    finally:
+                        eof.set()
+                t = threading.Thread(target=_stdout_reader, daemon=True)
+                t.start()
+                bytes_per_sample = 2
+                channels = 1
+                def _callback(outdata, frames, time_info, status):
+                    need = frames * channels * bytes_per_sample
+                    with buf_lock:
+                        have = len(pcm_buf)
+                        if have >= need:
+                            outdata[:] = pcm_buf[:need]
+                            del pcm_buf[:need]
+                        elif have > 0:
+                            outdata[:] = pcm_buf[:have] + b"\x00" * (need - have)
+                            pcm_buf.clear()
+                        else:
+                            outdata[:] = b"\x00" * need
+                try:
+                    with sd.RawOutputStream(
+                        samplerate=MP3_RATE,
+                        channels=1,
+                        dtype="int16",
+                        blocksize=2048,
+                        callback=_callback,
+                    ):
+                        try:
+                            while True:
+                                msg = await ws.recv()
+                                data = json.loads(msg)
+
+                                if "audio" in data:
+                                    b64 = data["audio"]
+                                    if isinstance(b64, str) and b64:
+                                        mp3 = base64.b64decode(b64)
+                                        received_audio_bytes += len(mp3)
+                                        if LOG_CHUNKS:
+                                            print(f"[TTS] got MP3 bytes: {len(mp3)} (total {received_audio_bytes})")
+                                        try:
+                                            ff.stdin.write(mp3); ff.stdin.flush()
+                                        except (BrokenPipeError, ValueError, OSError) as e:
+                                            if LOG_CHUNKS: print(f"[TTS] ffmpeg stdin aborted: {e}")
+                                            break
+                                    else:
+                                        if LOG_CHUNKS:
+                                            print("[TTS] got MP3 placeholder (no audio)")
+                                elif "error" in data:
+                                    print(f"[TTS] server ERROR: {data['error']}", file=sys.stderr)
+                                elif "message" in data:
+                                    if LOG_CHUNKS: print(f"[TTS] server msg: {data['message']}")
+
+                                if data.get("isFinal"):
+                                    if LOG_CHUNKS: print("[TTS] isFinal received")
+                                    break
+                        except (websockets.ConnectionClosedOK, websockets.ConnectionClosedError):
+                            pass
+                        except Exception as e:
+                            print(f"[TTS] WS reader (MP3) exception: {e}", file=sys.stderr)
+                        try:
+                            ff.stdin.close()
+                        except Exception:
+                            pass
+                        eof.wait(timeout=2.0)
+                        while True:
+                            with buf_lock:
+                                remaining = len(pcm_buf)
+                            if remaining == 0:
+                                break
+                            await asyncio.sleep(0.03)
+                        await asyncio.sleep(0.05)
+                finally:
+                    pass
+                ws_done.set()
+            # ==========================================================================
+            async def ws_writer():
+                nonlocal sent_first, pieces_count, sent_chars
+                last_piece_text = ""
+                try:
+                    async for piece in text_iter:
+                        piece = (piece or "").strip()
+                        if not piece:
+                            continue
+                        pieces_count += 1
+                        sent_chars += len(piece)
+                        last_piece_text = piece
+                        if not sent_first:
+                            await ws.send(json.dumps({"text": piece, "try_trigger_generation": True}))
+                            sent_first = True
+                            if LOG_CHUNKS: print(f"[TTS] sent FIRST piece ({len(piece)} chars)")
+                        else:
+                            await ws.send(json.dumps({"text": piece}))
+                            if LOG_CHUNKS: print(f"[TTS] sent piece {pieces_count} (+{len(piece)} chars)")
+                    if not re.search(r'[\.!\?…]$', last_piece_text):
+                        await ws.send(json.dumps({"text": "."}))
+                    await ws.send(json.dumps({"flush": True}))
+                    await ws.send(json.dumps({"text": ""}))
+                    if LOG_CHUNKS: print("[TTS] sent flush + end")
+                except Exception as e:
+                    print(f"[TTS] WS writer exception: {e}", file=sys.stderr)
+                finally:
+                    writer_done.set()
+                    try:
+                        await asyncio.wait_for(ws_done.wait(), timeout=1.5)
+                    except asyncio.TimeoutError:
+                        pass
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+            reader_task = asyncio.create_task(ws_reader_pcm() if USE_PCM_DEBUG else ws_reader_mp3())
+            writer_task = asyncio.create_task(ws_writer())
+            await writer_done.wait()
+            await ws_done.wait()
+            if USE_PCM_DEBUG:
+                decoder_done.set()
+            else:
+                decoder_done.set()
+            for t in (reader_task, writer_task):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(reader_task, writer_task, return_exceptions=True)
+        if ff:
+            try:
+                ff.terminate()
+                ff.wait(timeout=2)
+            except Exception:
+                pass
+        print(f"[TTS] done pieces={pieces_count}, sent_chars={sent_chars}, recv_bytes={received_audio_bytes}")
+        print("[TTS] Streamed audio (WS).")
+
+async def openai_sentence_stream(
+    messages,
+    model="gpt-4o-mini",
+    max_tokens=120,
+    temperature=0.65,
+    # opener vs rest:
+    first_min_chars=25,
+    first_max_chars=90,
+    rest_min_chars=80,
+    rest_max_chars=180,
+):
+    """
+    Yields a short first sentence quickly, then normal-sized complete sentences.
+    """
+    buf = ""
+    first_done = False
+    stream = openai.chat.completions.create(
+        model=model, messages=messages, temperature=temperature,
+        max_tokens=max_tokens, stream=True
+    )
+    loop = asyncio.get_running_loop()
+    q: asyncio.Queue[str | None] = asyncio.Queue()
+    def _pump():
+        try:
+            for d in stream:
+                try:
+                    delta = d.choices[0].delta.content or ""
+                except Exception:
+                    delta = ""
+                asyncio.run_coroutine_threadsafe(q.put(delta), loop)
+        finally:
+            asyncio.run_coroutine_threadsafe(q.put(None), loop)
+    threading.Thread(target=_pump, daemon=True).start()
+    while True:
+        d = await q.get()
+        if d is None:
+            break
+        buf += d
+        min_chars = first_min_chars if not first_done else rest_min_chars
+        max_chars = first_max_chars if not first_done else rest_max_chars
+        if len(buf) >= min_chars and (SENT_END.search(buf) or len(buf) >= max_chars):
+            chunk = buf.strip()
+            if not re.search(r'[\.!\?…]$', chunk):
+                chunk += "."
+            yield chunk
+            buf = ""
+            first_done = True
+    tail = buf.strip()
+    if tail:
+        if not re.search(r'[\.!\?…]$', tail):
+            tail += "."
+        yield tail
 
 def capture_screenshot_to_s3_url(
     max_side_px: int = 1280,
@@ -236,26 +729,21 @@ def capture_screenshot_to_s3_url(
         with mss() as sct:
             raw = sct.grab(sct.monitors[1])
             img = Image.frombytes("RGB", raw.size, raw.rgb)
-
         w, h = img.size
         scale = max(w, h) / float(max_side_px)
         if scale > 1:
             img = img.resize((int(w/scale), int(h/scale)), Image.LANCZOS)
-
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
         buf.seek(0)
-
         ts = int(time.time() * 1000)
         key = f"{S3_PREFIX}shot_{ts}.jpg"
-
         s3.upload_fileobj(
             buf,
             S3_BUCKET,
             key,
             ExtraArgs={"ContentType": "image/jpeg", "ACL": "private"},
         )
-
         url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": S3_BUCKET, "Key": key},
@@ -265,7 +753,6 @@ def capture_screenshot_to_s3_url(
         regional_host = f".s3.{AWS_REGION}.amazonaws.com"
         if global_host in url and regional_host not in url:
             url = url.replace(global_host, regional_host)
-
         return url, key
     except Exception as e:
         print(f"[Screenshot/S3] Failed: {e}")
@@ -310,9 +797,11 @@ async def _call_ai_and_tts(meta: dict):
     Args:
         meta (dict): Metadata containing the event details.
     """
+    event_type = meta.get("event")
+    player_id = meta.get("player")
+    max_tokens, max_chars = decide_speech_budget(event_type, player_id)
     context_event = meta.get("context_event", {})
     print(f"[AI] Processing context_event: {context_event}")
-    player_id = meta.get("player")
     tilt_value = TILT_STATE.get(player_id, 0)
     player_state = json.dumps(meta.get("player_state", {}), indent=2)
     current = json.dumps({k:v for k,v in meta.items() if k!="player_state"}, indent=2)
@@ -322,7 +811,7 @@ async def _call_ai_and_tts(meta: dict):
         "Always say “you” (never the username).  \n"
         "Profanity allowed (FUCK, SHIT, DAMN).  \n"
         "Use ALL-CAPS, !!!, …, and — for emphasis;  \n"
-        "Occasionally rant 1-2 sentences if it fits.  \n"
+        "First sentence must be short (≤ 12 words). Then continue.  \n"
     )
     system_prompt += f"Current rage level (0 calm - {MAX_TILT} max rage): {tilt_value}. Adjust your tone accordingly.\n"
     user_prompt = (        
@@ -337,20 +826,24 @@ async def _call_ai_and_tts(meta: dict):
             "image_url": {"url": meta["screenshot_url"]},
             #"detail": "low"
         })
-    resp = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": content_parts}
-            ],
-        max_tokens=160,
-        temperature=1.0
-    )
-    text = resp.choices[0].message.content.strip()
-    print(f"[AI] Response: {text}")
-    audio = tts.text_to_speech.convert(text=text, voice_id=VOICE_ID)
-    play(audio)
-    print("[TTS] Played audio.")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": content_parts},
+    ]
+    print("[AI] Streaming response...")
+    async def _text_iter():
+        base_iter = openai_sentence_stream(
+            messages,
+            model="gpt-4o-mini",
+            max_tokens=max_tokens,
+            temperature=0.65,
+            first_min_chars=20, first_max_chars=85,
+            rest_min_chars=90,  rest_max_chars=180,
+        )
+        async for piece in soft_cap_stream(base_iter, hard_cap_chars=max_chars, overflow_chars=160):
+            yield piece
+    await tts_ws_stream(_text_iter())
+    print("[TTS] Streamed audio (WS).")
     key = meta.get("screenshot_s3_key")
     if key:
         delete_s3_object(key)
@@ -621,11 +1114,11 @@ async def heartbeat_easter_eggs():
         choice = random.choice(["memory", "performance", "random_tip"])
         if choice == "memory" and len(MEMORY) > 0:
             ev = random.choice(list(MEMORY))
-            meta["comment"] = f"Remember when {ev.type} happened? {ev.details}"
+            meta["type: Memory"] = f"Remember when {ev.type} happened? {ev.details}"
         elif choice == "performance":
-            meta["comment"] = "Performance review: " + summarize_memory(limit=3)
+            meta["type: Review"] = "Performance review: " + summarize_memory(limit=3)
         else:
-            meta["comment"] = random.choice([
+            meta["type: Random Words Depending on Context"] = random.choice([
                 "Hey, ever thought about NOT dying?",
                 "Pro tip: Lava is hot.",
                 "Do you even know how to swing that pickaxe?",
