@@ -1,112 +1,441 @@
 {
+  "defaults": {
+    "value": 0,
+    "speak": { "nice_name": null },
+    "events": {
+      "smelt": { "batch_idle": 2.0 },
+      "craft": { "batch_idle": 1.0 },
+      "drop":  { "batch_idle": 1.0 },
+      "trade": { "batch_idle": 1.0 }
+    }
+  },
   "items": {
-    "minecraft:netherite_ingot":   { "category": "valuable", "threshold": 1 },
-    "minecraft:gold_ingot":        { "category": "valuable", "threshold": 32 },
-    "minecraft:iron_ingot":        { "category": "valuable", "threshold": 32 },
-    "minecraft:ender_pearl":       { "category": "valuable", "threshold": 1 },
-    "minecraft:blaze_rod":         { "category": "valuable", "threshold": 12 },
-    "minecraft:nether_star":       { "category": "valuable", "threshold": 1 },
-    "minecraft:totem_of_undying":  { "category": "valuable", "threshold": 1 },
-    "minecraft:gold_block":        { "category": "valuable", "threshold": 1 },
-    "minecraft:iron_block":        { "category": "valuable", "threshold": 1 },
-    "minecraft:diamond_block":     { "category": "valuable", "threshold": 1 },
-    "minecraft:emerald_block":     { "category": "valuable", "threshold": 1 },
-    "minecraft:netherite_block":   { "category": "valuable", "threshold": 1 },
-    "minecraft:beacon":            { "category": "valuable", "threshold": 1 },
-    "minecraft:enchanting_table":  { "category": "valuable", "threshold": 1 },
-    "minecraft:dragon_egg":        { "category": "valuable", "threshold": 1 },
-    "minecraft:shulker_box":       { "category": "valuable", "threshold": 1 },
-    "minecraft:ender_chest":       { "category": "valuable", "threshold": 1 },
-    "minecraft:anvil":             { "category": "valuable", "threshold": 1 },
-    "minecraft:respawn_anchor":    { "category": "valuable", "threshold": 1 },
-    "minecraft:lodestone":         { "category": "valuable", "threshold": 1 },
-    "minecraft:trident":           { "category": "valuable", "threshold": 1 },
-    "minecraft:elytra":            { "category": "valuable", "threshold": 1 },
-    "minecraft:enchanted_golden_apple":{ "category": "valuable", "threshold": 1 },
-    "minecraft:golden_apple":          { "category": "valuable", "threshold": 1 },
-    "minecraft:enchanted_book":        { "category": "valuable", "threshold": 1 },
-    "minecraft:dragon_head":           { "category": "valuable", "threshold": 1 },
-    "minecraft:wither_skeleton_skull": { "category": "valuable", "threshold": 1 },
-    "minecraft:experience_bottle":     { "category": "valuable", "threshold": 1 },
-    "minecraft:firework_rocket":       { "category": "valuable", "threshold": 1 },
-    "minecraft:firework_star":         { "category": "valuable", "threshold": 1 },
-    "minecraft:ghast_tear":            { "category": "valuable", "threshold": 1 },
-    "minecraft:phantom_membrane":      { "category": "valuable", "threshold": 1 },
-    "minecraft:shulker_shell":         { "category": "valuable", "threshold": 1 },
-    "minecraft:slime_ball":            { "category": "valuable", "threshold": 1 },
-    "minecraft:blaze_powder":          { "category": "valuable", "threshold": 12 },
-    "minecraft:ender_eye":             { "category": "valuable", "threshold": 12 },
-    "minecraft:eye_of_ender":          { "category": "valuable", "threshold": 12 },
-    "minecraft:dragon_breath":         { "category": "valuable", "threshold": 1 },
-    "minecraft:nautilus_shell":        { "category": "valuable", "threshold": 1 },
-    "minecraft:saddle":                { "category": "valuable", "threshold": 1 },
-    "minecraft:name_tag":              { "category": "valuable", "threshold": 1 },
-    
-    "minecraft:andesite":              { "category": "trash",    "threshold": 100 },
-    "minecraft:stone":                 { "category": "trash",    "threshold": 100 },
-    "minecraft:cobblestone":           { "category": "trash",    "threshold": 200 },
-    "minecraft:dirt":                  { "category": "trash",    "threshold": 200 },
-    "minecraft:netherrack":            { "category": "trash",    "threshold": 100 },
-    "minecraft:deepslate":             { "category": "trash",    "threshold": 100 },
-    "minecraft:granite":               { "category": "trash",    "threshold": 100 },
-    "minecraft:diorite":               { "category": "trash",    "threshold": 100 },
-    "minecraft:red_sand":              { "category": "trash",    "threshold": 100 },
-    "minecraft:coarse_dirt":           { "category": "trash",    "threshold": 100 },
-    "minecraft:podzol":                { "category": "trash",    "threshold": 100 },
-    "minecraft:mossy_cobblestone":     { "category": "trash",    "threshold": 100 },
-    "minecraft:oak_leaves":            { "category": "trash",    "threshold": 100 },
-    "minecraft:birch_leaves":          { "category": "trash",    "threshold": 100 },
-    "minecraft:spruce_leaves":         { "category": "trash",    "threshold": 100 },
-    "minecraft:acacia_leaves":         { "category": "trash",    "threshold": 100 },
-    "minecraft:jungle_leaves":         { "category": "trash",    "threshold": 100 },
-    "minecraft:dark_oak_leaves":       { "category": "trash",    "threshold": 100 },
-    "minecraft:dead_bush":             { "category": "trash",    "threshold": 100 },
-    "minecraft:flower_pot":            { "category": "trash",    "threshold": 100 },
-    "minecraft:kelp":                  { "category": "trash",    "threshold": 100 },
-    "minecraft:seagrass":              { "category": "trash",    "threshold": 100 },
-    "minecraft:fern":                  { "category": "trash",    "threshold": 100 },
-    "minecraft:tall_grass":            { "category": "trash",    "threshold": 100 },
-    "minecraft:grass_block":           { "category": "trash",    "threshold": 100 },
-    "minecraft:mycelium":              { "category": "trash",    "threshold": 100 },
-    "minecraft:clay":                  { "category": "trash",    "threshold": 100 },
-    "minecraft:snow":                  { "category": "trash",    "threshold": 100 },
-    "minecraft:ice":                   { "category": "trash",    "threshold": 100 },
-    "minecraft:packed_ice":            { "category": "trash",    "threshold": 100 },
-    "minecraft:blue_ice":              { "category": "trash",    "threshold": 100 },
-    "minecraft:dripstone_block":       { "category": "trash",    "threshold": 100 },
-    "minecraft:calcite":               { "category": "trash",    "threshold": 100 },
-    "minecraft:tuff":                  { "category": "trash",    "threshold": 100 },
-    "minecraft:sculk":                 { "category": "trash",    "threshold": 100 },
-    "minecraft:sculk_vein":            { "category": "trash",    "threshold": 100 },
-    "minecraft:sculk_sensor":          { "category": "trash",    "threshold": 100 },
-    "minecraft:sculk_catalyst":        { "category": "trash",    "threshold": 100 },
-    "minecraft:sculk_shrieker":        { "category": "trash",    "threshold": 100 },
-    "minecraft:cracked_stone_bricks":  { "category": "trash",    "threshold": 100 },
-    "minecraft:mossy_stone_bricks":    { "category": "trash",    "threshold": 100 },
-    "minecraft:chiseled_stone_bricks": { "category": "trash",    "threshold": 100 },
-    "minecraft:infested_stone":        { "category": "trash",    "threshold": 100 },
-    "minecraft:infested_cobblestone":  { "category": "trash",    "threshold": 100 },
-    "minecraft:infested_stone_bricks": { "category": "trash",    "threshold": 100 },
-    "minecraft:infested_mossy_stone_bricks": {"category":"trash","threshold":100},
-    "minecraft:infested_cracked_stone_bricks":{"category":"trash","threshold":100},
-    "minecraft:infested_chiseled_stone_bricks":{"category":"trash","threshold":100},
-    "minecraft:terracotta":            {"category": "trash",    "threshold": 100 },
-    "minecraft:white_terracotta":      { "category": "trash",    "threshold": 100 },
-    "minecraft:orange_terracotta":     { "category": "trash",    "threshold": 100 },
-    "minecraft:magenta_terracotta":    { "category": "trash",    "threshold": 100 },
-    "minecraft:light_blue_terracotta": { "category": "trash",    "threshold": 100 },
-    "minecraft:yellow_terracotta":     { "category": "trash",    "threshold": 100 },
-    "minecraft:lime_terracotta":       { "category": "trash",    "threshold": 100 },
-    "minecraft:pink_terracotta":       { "category": "trash",    "threshold": 100 },
-    "minecraft:gray_terracotta":       { "category": "trash",    "threshold": 100 },
-    "minecraft:light_gray_terracotta": { "category": "trash",    "threshold": 100 },
-    "minecraft:cyan_terracotta":       { "category": "trash",    "threshold": 100 },
-    "minecraft:purple_terracotta":     { "category": "trash",    "threshold": 100 },
-    "minecraft:blue_terracotta":       { "category": "trash",    "threshold": 100 },
-    "minecraft:brown_terracotta":      { "category": "trash",    "threshold": 100 },
-    "minecraft:green_terracotta":      { "category": "trash",    "threshold": 100 },
-    "minecraft:red_terracotta":        { "category": "trash",    "threshold": 100 },
-    "minecraft:black_terracotta":      { "category": "trash",    "threshold": 100 }
+    "minecraft:iron_ingot": {
+      "category": "valuable",
+      "threshold": 32,
+      "value": 1,
+      "speak": { "nice_name": "iron" },
+      "events": { "smelt": { "batch_idle": 2.5 }, "craft": { "batch_idle": 1.0 } },
+      "tags": ["metal","ore_product"]
+    },
+    "minecraft:raw_iron": {
+      "category": "valuable",
+      "threshold": 32,
+      "value": 0,
+      "speak": { "nice_name": "raw iron" },
+      "events": { "smelt": { "batch_idle": 2.5 } },
+      "tags": ["metal","raw_ore"]
+    },
+    "minecraft:iron_ore": {
+      "category": "valuable",
+      "threshold": 16,
+      "value": 0,
+      "speak": { "nice_name": "iron ore" },
+      "tags": ["ore"]
+    },
+    "minecraft:copper_ingot": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "copper" },
+      "events": { "smelt": { "batch_idle": 2.2 } },
+      "tags": ["metal","ore_product"]
+    },
+    "minecraft:raw_copper": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "raw copper" },
+      "events": { "smelt": { "batch_idle": 2.2 } },
+      "tags": ["raw_ore"]
+    },
+    "minecraft:copper_ore": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "copper ore" },
+      "tags": ["ore"]
+    },
+    "minecraft:gold_ingot": {
+      "category": "valuable",
+      "threshold": 16,
+      "value": 2,
+      "speak": { "nice_name": "gold" },
+      "events": { "smelt": { "batch_idle": 2.8 } },
+      "tags": ["metal","ore_product","barter"]
+    },
+    "minecraft:raw_gold": {
+      "category": "valuable",
+      "threshold": 16,
+      "value": 0,
+      "speak": { "nice_name": "raw gold" },
+      "events": { "smelt": { "batch_idle": 2.8 } },
+      "tags": ["raw_ore"]
+    },
+    "minecraft:gold_ore": {
+      "category": "valuable",
+      "threshold": 12,
+      "value": 0,
+      "speak": { "nice_name": "gold ore" },
+      "tags": ["ore"]
+    },
+    "minecraft:coal": {
+      "category": "fuel",
+      "threshold": 64,
+      "value": 1,
+      "speak": { "nice_name": "coal" },
+      "tags": ["fuel","ore_product"]
+    },
+    "minecraft:charcoal": {
+      "category": "fuel",
+      "threshold": 64,
+      "value": 1,
+      "speak": { "nice_name": "charcoal" },
+      "tags": ["fuel"]
+    },
+    "minecraft:diamond": {
+      "category": "rare",
+      "threshold": 8,
+      "value": 8,
+      "speak": { "nice_name": "diamond" },
+      "tags": ["gem","upgrade"]
+    },
+    "minecraft:emerald": {
+      "category": "valuable",
+      "threshold": 16,
+      "value": 4,
+      "speak": { "nice_name": "emerald" },
+      "events": { "trade": { "batch_idle": 1.2 } },
+      "tags": ["currency","villager_trade"]
+    },
+    "minecraft:lapis_lazuli": {
+      "category": "utility",
+      "threshold": 32,
+      "value": 1,
+      "speak": { "nice_name": "lapis" },
+      "tags": ["enchant","ore_product"]
+    },
+    "minecraft:redstone": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 1,
+      "speak": { "nice_name": "redstone" },
+      "tags": ["redstone","ore_product"]
+    },
+    "minecraft:quartz": {
+      "category": "utility",
+      "threshold": 32,
+      "value": 1,
+      "speak": { "nice_name": "quartz" },
+      "tags": ["nether","ore_product"]
+    },
+    "minecraft:ancient_debris": {
+      "category": "rare",
+      "threshold": 2,
+      "value": 12,
+      "speak": { "nice_name": "ancient debris" },
+      "tags": ["nether","ore"]
+    },
+    "minecraft:netherite_scrap": {
+      "category": "rare",
+      "threshold": 4,
+      "value": 12,
+      "speak": { "nice_name": "netherite scrap" },
+      "tags": ["nether","upgrade"]
+    },
+    "minecraft:netherite_ingot": {
+      "category": "rare",
+      "threshold": 1,
+      "value": 24,
+      "speak": { "nice_name": "netherite" },
+      "tags": ["nether","upgrade"]
+    },
+    "minecraft:blaze_rod": {
+      "category": "quest",
+      "threshold": 4,
+      "value": 6,
+      "speak": { "nice_name": "blaze rod" },
+      "tags": ["nether","end_progression"]
+    },
+    "minecraft:blaze_powder": {
+      "category": "quest",
+      "threshold": 4,
+      "value": 3,
+      "speak": { "nice_name": "blaze powder" },
+      "tags": ["end_progression"]
+    },
+    "minecraft:ender_pearl": {
+      "category": "quest",
+      "threshold": 8,
+      "value": 5,
+      "speak": { "nice_name": "ender pearl" },
+      "tags": ["end_progression"]
+    },
+    "minecraft:eye_of_ender": {
+      "category": "quest",
+      "threshold": 4,
+      "value": 8,
+      "speak": { "nice_name": "eye of ender" },
+      "tags": ["end_progression"]
+    },
+    "minecraft:string": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "string" },
+      "tags": ["mob_drop"]
+    },
+    "minecraft:gunpowder": {
+      "category": "ammo",
+      "threshold": 32,
+      "value": 2,
+      "speak": { "nice_name": "gunpowder" },
+      "tags": ["mob_drop","rockets"]
+    },
+    "minecraft:paper": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "paper" },
+      "tags": ["crafting"]
+    },
+    "minecraft:stick": {
+      "category": "utility",
+      "threshold": 128,
+      "value": 0,
+      "speak": { "nice_name": "sticks" },
+      "tags": ["crafting"]
+    },
+    "minecraft:leather": {
+      "category": "utility",
+      "threshold": 32,
+      "value": 1,
+      "speak": { "nice_name": "leather" },
+      "tags": ["mob_drop"]
+    },
+    "minecraft:slime_ball": {
+      "category": "utility",
+      "threshold": 16,
+      "value": 3,
+      "speak": { "nice_name": "slimeball" },
+      "tags": ["mob_drop","redstone"]
+    },
+    "minecraft:magma_cream": {
+      "category": "utility",
+      "threshold": 16,
+      "value": 3,
+      "speak": { "nice_name": "magma cream" },
+      "tags": ["nether","potion"]
+    },
+    "minecraft:ghast_tear": {
+      "category": "rare",
+      "threshold": 2,
+      "value": 6,
+      "speak": { "nice_name": "ghast tear" },
+      "tags": ["nether","potion"]
+    },
+    "minecraft:phantom_membrane": {
+      "category": "utility",
+      "threshold": 8,
+      "value": 2,
+      "speak": { "nice_name": "phantom membrane" },
+      "tags": ["elytra_repair"]
+    },
+    "minecraft:bow": {
+      "category": "combat",
+      "threshold": 1,
+      "value": 2,
+      "speak": { "nice_name": "bow" },
+      "tags": ["weapon"]
+    },
+    "minecraft:crossbow": {
+      "category": "combat",
+      "threshold": 1,
+      "value": 3,
+      "speak": { "nice_name": "crossbow" },
+      "tags": ["weapon"]
+    },
+    "minecraft:arrow": {
+      "category": "ammo",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "arrows" },
+      "tags": ["ammo"]
+    },
+    "minecraft:elytra": {
+      "category": "rare",
+      "threshold": 1,
+      "value": 30,
+      "speak": { "nice_name": "elytra" },
+      "tags": ["end","mobility"]
+    },
+    "minecraft:firework_rocket": {
+      "category": "mobility",
+      "threshold": 32,
+      "value": 0,
+      "speak": { "nice_name": "rockets" },
+      "events": { "craft": { "batch_idle": 1.2 }, "drop": { "batch_idle": 0.8 } },
+      "tags": ["elytra","mobility"]
+    },
+    "minecraft:torch": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "torches" },
+      "tags": ["lighting"]
+    },
+    "minecraft:lantern": {
+      "category": "utility",
+      "threshold": 16,
+      "value": 1,
+      "speak": { "nice_name": "lanterns" },
+      "tags": ["lighting"]
+    },
+    "minecraft:stone": {
+      "category": "trash",
+      "threshold": 100,
+      "value": 0,
+      "speak": { "nice_name": "stone" },
+      "events": { "drop": { "batch_idle": 0.75 } }
+    },
+    "minecraft:cobblestone": {
+      "category": "trash",
+      "threshold": 128,
+      "value": 0,
+      "speak": { "nice_name": "cobblestone" },
+      "events": { "drop": { "batch_idle": 0.6 } },
+      "tags": ["overburden"]
+    },
+    "minecraft:dirt": {
+      "category": "trash",
+      "threshold": 128,
+      "value": 0,
+      "speak": { "nice_name": "dirt" },
+      "events": { "drop": { "batch_idle": 0.6 } },
+      "tags": ["overburden"]
+    },
+    "minecraft:netherrack": {
+      "category": "trash",
+      "threshold": 128,
+      "value": 0,
+      "speak": { "nice_name": "netherrack" },
+      "events": { "drop": { "batch_idle": 0.6 } },
+      "tags": ["overburden","nether"]
+    },
+    "minecraft:deepslate": {
+      "category": "trash",
+      "threshold": 128,
+      "value": 0,
+      "speak": { "nice_name": "deepslate" },
+      "events": { "drop": { "batch_idle": 0.6 } },
+      "tags": ["overburden"]
+    },
+    "minecraft:gravel": {
+      "category": "trash",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "gravel" },
+      "events": { "drop": { "batch_idle": 0.6 } },
+      "tags": ["overburden"]
+    },
+    "minecraft:sand": {
+      "category": "utility",
+      "threshold": 64,
+      "value": 0,
+      "speak": { "nice_name": "sand" },
+      "tags": ["glass"]
+    },
+    "minecraft:bread": {
+      "category": "food",
+      "threshold": 16,
+      "value": 0,
+      "speak": { "nice_name": "bread" },
+      "tags": ["villager_food"]
+    },
+    "minecraft:cooked_beef": {
+      "category": "food",
+      "threshold": 32,
+      "value": 1,
+      "speak": { "nice_name": "steak" },
+      "events": { "smelt": { "batch_idle": 1.6 } },
+      "tags": ["food"]
+    },
+    "minecraft:golden_apple": {
+      "category": "rare",
+      "threshold": 1,
+      "value": 10,
+      "speak": { "nice_name": "golden apple" },
+      "tags": ["combat","healing"]
+    },
+    "minecraft:enchanted_golden_apple": {
+      "category": "rare",
+      "threshold": 1,
+      "value": 40,
+      "speak": { "nice_name": "notch apple" },
+      "tags": ["combat","healing","ultra_rare"]
+    },
+    "minecraft:obsidian": {
+      "category": "utility",
+      "threshold": 16,
+      "value": 2,
+      "speak": { "nice_name": "obsidian" },
+      "tags": ["portal","blast_resistant"]
+    },
+    "minecraft:ender_chest": {
+      "category": "rare",
+      "threshold": 1,
+      "value": 12,
+      "speak": { "nice_name": "ender chest" },
+      "tags": ["storage","mobility"]
+    },
+    "minecraft:book": {
+      "category": "utility",
+      "threshold": 16,
+      "value": 0,
+      "speak": { "nice_name": "books" },
+      "tags": ["enchant","trade"]
+    },
+    "minecraft:bookshelf": {
+      "category": "utility",
+      "threshold": 6,
+      "value": 2,
+      "speak": { "nice_name": "bookshelves" },
+      "tags": ["enchant"]
+    },
+    "minecraft:experience_bottle": {
+      "category": "utility",
+      "threshold": 8,
+      "value": 4,
+      "speak": { "nice_name": "bottle o' enchanting" },
+      "tags": ["xp","villager_trade"]
+    },
+    "minecraft:compass": {
+      "category": "utility",
+      "threshold": 1,
+      "value": 1,
+      "speak": { "nice_name": "compass" },
+      "tags": ["navigation"]
+    },
+    "minecraft:recovery_compass": {
+      "category": "rare",
+      "threshold": 1,
+      "value": 6,
+      "speak": { "nice_name": "recovery compass" },
+      "tags": ["ancient_city","navigation"]
+    },
+    "minecraft:amethyst_shard": {
+      "category": "utility",
+      "threshold": 32,
+      "value": 1,
+      "speak": { "nice_name": "amethyst" },
+      "tags": ["geode","tinted_glass"]
+    },
+    "minecraft:honeycomb": {
+      "category": "utility",
+      "threshold": 16,
+      "value": 1,
+      "speak": { "nice_name": "honeycomb" },
+      "tags": ["bees","wax"]
+    }
   }
 }
-

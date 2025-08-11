@@ -90,6 +90,26 @@ THRESHOLD_FACTOR = 1.5
 HIT_TOTALS = defaultdict(int)      # src -> total hits ever
 NEXT_ALERT = defaultdict(lambda: INITIAL_HIT_ALERT)  # src -> next threshold
 
+# ---- New batching / debounce state ----
+BATCH_IDLE_SECONDS = 2.0
+SHORT_IDLE_SECONDS = 1.0
+SMELT_BATCH = {}
+BREW_BATCH = {}
+TRADE_BATCH = {}
+DROP_BATCH = {}
+CRAFT_BATCH = {}
+HEALTH_LOW_PENDING = {}
+EFFECT_PENDING = {}
+
+# Optional value mapping (adjust as you like, fallback to 0 if unknown)
+PRICE_TABLE = {
+    "minecraft:iron_ingot": 1,
+    "minecraft:gold_ingot": 2,
+    "minecraft:diamond": 8,
+    "minecraft:netherite_ingot": 24,
+}
+
+
 #Friendly fire config
 FRIENDLY_ANIMALS = {
     "minecraft:cow", "minecraft:sheep", "minecraft:pig", "minecraft:chicken",
@@ -108,11 +128,29 @@ chroma = PersistentClient(path=".chromadb")
 collection = chroma.get_or_create_collection("mc_memory")
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Load Item Categories from JSON
+# --- Items config helpers ---
 with open("items.json") as f:
-    _cfg = json.load(f)["items"]
-ITEMS_CONFIG = _cfg
-print("Loaded", len(ITEMS_CONFIG), "pickup configs from items.json")
+    raw_cfg = json.load(f)
+DEFAULTS = raw_cfg.get("defaults", {})
+ITEMS_CONFIG = raw_cfg.get("items", {})
+print("Loaded", len(ITEMS_CONFIG), "items from items.json")
+
+def _cfg_for(item_id: str) -> dict:
+    base = dict(DEFAULTS)
+    base.update(ITEMS_CONFIG.get(item_id, {}))
+    return base
+
+def item_value(item_id: str) -> int:
+    return int(_cfg_for(item_id).get("value", DEFAULTS.get("value", 0)))
+
+def item_nice(item_id: str) -> str:
+    speak = _cfg_for(item_id).get("speak", {})
+    return speak.get("nice_name") or item_id
+
+def event_idle(item_id: str, ev_kind: str, fallback: float) -> float:
+    evs = _cfg_for(item_id).get("events", {})
+    return float(evs.get(ev_kind, {}).get("batch_idle",
+                 DEFAULTS.get("events", {}).get(ev_kind, {}).get("batch_idle", fallback)))
 
 # Tilt state tracking
 TILT_STATE = defaultdict(int)  # player_id -> tilt value
@@ -123,7 +161,6 @@ TILT_DECAY = 1
 CHAT_COOLDOWN_SECONDS = 8
 LAST_CHAT_REPLY = defaultdict(float)  # player_id -> last reply ts
 
-
 def adjust_tilt(player_id, delta):
     TILT_STATE[player_id] = max(0, min(MAX_TILT, TILT_STATE[player_id] + delta))
     print(f"[Tilt] Player {player_id} tilt now {TILT_STATE[player_id]}")
@@ -133,7 +170,6 @@ def adjust_tilt(player_id, delta):
 heartbeat_reset = asyncio.Event()
 HEARTBEAT_MIN = 60   # 1 minute
 HEARTBEAT_MAX = 180  # 3 minutes
-
 
 # Data Structures
 @dataclass
@@ -852,6 +888,373 @@ async def _call_ai_and_tts(meta: dict):
 # Event Handlers
 # ------------------------------------------------------------------------------
 
+def _price_of(item: str) -> int:
+    return item_value(item)
+
+async def _emit_meta(meta: dict):
+    """Common emit that mirrors your analyzer path (adds screenshot/context)."""
+    url, key = capture_screenshot_to_s3_url()
+    if url and key:
+        meta["screenshot_url"] = url
+        meta["screenshot_s3_key"] = key
+    if LAST_PLAYER_STATE is not None:
+        meta["context_event"] = LAST_PLAYER_STATE
+    await enqueue_meta(meta)
+    record_memory(meta.get("event", "meta"), **meta)
+
+def on_health_low(idx: int, ev: dict):
+    if ev.get("type") != "health_low":
+        return None
+    player = ev.get("player")
+    hp = ev.get("current")
+    if not player:
+        return None
+    task = HEALTH_LOW_PENDING.pop(player, None)
+    if task and not task.done():
+        task.cancel()
+    async def _fire():
+        try:
+            await asyncio.sleep(1.0)
+            meta = {"event": "health_low", "player": player, "health": hp}
+            await _emit_meta(meta)
+        except asyncio.CancelledError:
+            pass
+    HEALTH_LOW_PENDING[player] = asyncio.create_task(_fire())
+    return None
+
+def cancel_health_low_for(player: str):
+    t = HEALTH_LOW_PENDING.pop(player, None)
+    if t and not t.done():
+        t.cancel()
+
+def on_entity_kill(idx: int, ev: dict):
+    if ev.get("type") != "entity_kill":
+        return None
+    return {
+        "event": "entity_kill",
+        "player": ev.get("player"),
+        "entity_type": ev.get("entity_type"),
+    }
+
+def on_smelt_complete(idx: int, ev: dict):
+    if ev.get("type") != "smelt_complete": return None
+    player = ev.get("player"); item = ev.get("item"); count = int(ev.get("count", 1))
+    if not player or not item: return None
+    key = (player, item)
+    st = SMELT_BATCH.get(key, {"count": 0, "task": None, "idle": event_idle(item, "smelt", BATCH_IDLE_SECONDS)})
+    st["count"] += count
+    st_idle = st["idle"]
+    if st.get("task") and not st["task"].done():
+        st["task"].cancel()
+    async def _flush():
+        try:
+            await asyncio.sleep(st_idle)
+            total = st["count"]
+            value = total * item_value(item)
+            meta = {
+                "event": "smelt_batch",
+                "player": player,
+                "item": item,
+                "item_name": item_nice(item),
+                "count": total,
+                "value": value
+            }
+            SMELT_BATCH.pop(key, None)
+            await _emit_meta(meta)
+        except asyncio.CancelledError:
+            pass
+    st["task"] = asyncio.create_task(_flush())
+    SMELT_BATCH[key] = st
+    return None
+
+def on_potion_brew(idx: int, ev: dict):
+    """
+    Batches potion_brew events from BrewingMixin.
+
+    Incoming ev looks like:
+      {
+        "type": "potion_brew",
+        "location": "x,y,z",
+        "dimension": "minecraft:overworld",
+        "ingredient_item": "minecraft:nether_wart",  # optional
+        "result_bottles": [
+          {"slot":0,"item":"minecraft:potion","potion_id":"minecraft:awkward", ...},
+          {"slot":1,"empty":true},
+          {"slot":2,"item":"minecraft:potion","potion_id":"minecraft:swiftness",
+           "custom_effects":[{"id":"minecraft:speed","amplifier":0,"duration":3600}],
+           "custom_color": 1234567}
+        ],
+        "timestamp": ...
+      }
+
+    We aggregate by stand (dimension+location) and by output signature:
+      (item, potion_id, custom_color, custom_effects_signature)
+    Then flush once no new ticks come in for BATCH_IDLE_SECONDS.
+    """
+    if ev.get("type") != "potion_brew":
+        return None
+    dimension = ev.get("dimension")
+    location  = ev.get("location")
+    if not dimension or not location:
+        return None
+    key = (dimension, location)
+    st = BREW_BATCH.get(key)
+    if not st:
+        st = {
+            "by_output": {},
+            "ingredient": None,
+            "task": None,
+        }
+    ingr = ev.get("ingredient_item")
+    if ingr:
+        st["ingredient"] = ingr
+    for b in ev.get("result_bottles", []):
+        if b.get("empty"):
+            continue
+        item = b.get("item")
+        if not item:
+            continue
+        potion_id = b.get("potion_id")
+        color = b.get("custom_color")
+        effects = b.get("custom_effects")
+        if effects:
+            sig = tuple(sorted(
+                (e.get("id"), int(e.get("amplifier", 0)), int(e.get("duration", 0)))
+                for e in effects
+            ))
+        else:
+            sig = None
+        out_key = (item, potion_id, color, sig)
+        st["by_output"][out_key] = st["by_output"].get(out_key, 0) + 1
+    if st.get("task") and not st["task"].done():
+        st["task"].cancel()
+    async def _flush():
+        try:
+            await asyncio.sleep(BATCH_IDLE_SECONDS)
+            by_output = st["by_output"]
+            results = []
+            total = 0
+            for (item, potion_id, color, sig), cnt in by_output.items():
+                entry = {"item": item, "count": cnt, "item_name": item_nice(item)}
+                if potion_id:
+                    entry["potion_id"] = potion_id
+                if color is not None:
+                    entry["custom_color"] = color
+                if sig:
+                    entry["custom_effects"] = [
+                        {"id": eid, "amplifier": amp, "duration": dur}
+                        for (eid, amp, dur) in sig
+                    ]
+                results.append(entry)
+                total += cnt
+            meta = {
+                "event": "brew_batch",
+                "dimension": key[0],
+                "location": key[1],
+                "ingredient_item": st.get("ingredient"),
+                "results": results,
+                "total_bottles": total,
+            }
+            BREW_BATCH.pop(key, None)
+            await _emit_meta(meta)
+        except asyncio.CancelledError:
+            pass
+    st["task"] = asyncio.create_task(_flush())
+    BREW_BATCH[key] = st
+    return None
+
+def on_villager_trade(idx: int, ev: dict):
+    if ev.get("type") != "villager_trade":
+        return None
+    player = ev.get("player")
+    dim = ev.get("dimension")
+    pos = ev.get("villager_pos")
+    if not player or not dim or not pos:
+        return None
+    prof = ev.get("villager_profession")
+    level = ev.get("villager_level")
+    key = (player, dim, pos)
+    st = TRADE_BATCH.get(key, {
+        "trades": [],
+        "task": None,
+        "profession": prof,
+        "level": level,
+    })
+    trade = {
+        "sell": {
+            "item": ev.get("sell_item"),
+            "count": int(ev.get("sell_count", 1)),
+        },
+        "buy": [],
+        "uses": ev.get("uses"),
+        "max_uses": ev.get("max_uses"),
+        "merchant_experience": ev.get("merchant_experience"),
+        "special_price": ev.get("special_price"),
+        "demand_bonus": ev.get("demand_bonus"),
+        "price_multiplier": ev.get("price_multiplier"),
+        "out_of_stock": bool(ev.get("out_of_stock")),
+    }
+    buy_a_item = ev.get("buy_a_item")
+    if buy_a_item:
+        trade["buy"].append({
+            "item": buy_a_item,
+            "count": int(ev.get("buy_a_count", 0)),
+        })
+    buy_b_item = ev.get("buy_b_item")
+    if buy_b_item:
+        trade["buy"].append({
+            "item": buy_b_item,
+            "count": int(ev.get("buy_b_count", 0)),
+        })
+    st["trades"].append(trade)
+    if st.get("task") and not st["task"].done():
+        st["task"].cancel()
+    trade["sell"]["item_name"] = item_nice(trade["sell"]["item"])
+    trade["sell"]["value"] = item_value(trade["sell"]["item"]) * int(trade["sell"]["count"])
+    async def _flush():
+        try:
+            await asyncio.sleep(SHORT_IDLE_SECONDS)
+            trades = st["trades"]
+            total_trades = len(trades)
+            summary = {}
+            emeralds_spent = 0
+            for t in trades:
+                sell_item = t["sell"]["item"]
+                sell_count = int(t["sell"]["count"])
+                if sell_item:
+                    summary[sell_item] = summary.get(sell_item, 0) + sell_count
+                for b in t["buy"]:
+                    b["item_name"] = item_nice(b["item"])
+                    if b.get("item") == "minecraft:emerald":
+                        emeralds_spent += int(b.get("count", 0))
+            meta = {
+                "event": "trade_batch",
+                "player": player,
+                "dimension": dim,
+                "villager_pos": pos,
+                "villager_profession": st.get("profession"),
+                "villager_level": st.get("level"),
+                "total_trades": total_trades,
+                "emeralds_spent": emeralds_spent,
+                "summary": summary,
+                "trades": trades,
+            }
+            TRADE_BATCH.pop(key, None)
+            await _emit_meta(meta)
+        except asyncio.CancelledError:
+            pass
+    st["task"] = asyncio.create_task(_flush())
+    TRADE_BATCH[key] = st
+    return None
+
+def on_item_drop(idx: int, ev: dict):
+    if ev.get("type") != "item_drop":
+        return None
+    player = ev.get("player")
+    item = ev.get("item")
+    count = int(ev.get("count", 1))
+    if not player or not item:
+        return None
+    key = (player, item)
+    st = DROP_BATCH.get(key, {"count": 0, "task": None, "idle": event_idle(item, "drop", SHORT_IDLE_SECONDS)})
+    st["count"] += count
+    idle = st["idle"]
+    if st.get("task") and not st["task"].done():
+        st["task"].cancel()
+    async def _flush():
+            try:
+                await asyncio.sleep(idle)
+                total = st["count"]
+                DROP_BATCH.pop(key, None)
+                meta = {
+                    "event": "drop_batch",
+                    "player": player,
+                    "item": item,
+                    "item_name": item_nice(item),
+                    "count": total,
+                    "value": total * item_value(item)
+                }
+                await _emit_meta(meta)
+            except asyncio.CancelledError:
+                pass
+    st["task"] = asyncio.create_task(_flush())
+    DROP_BATCH[key] = st
+    return None
+
+def on_item_craft(idx: int, ev: dict):
+    if ev.get("type") != "item_craft":
+        return None
+    player = ev.get("player")
+    item = ev.get("item")
+    count = int(ev.get("count", 1))
+    if not player or not item:
+        return None
+    key = (player, item)
+    st = CRAFT_BATCH.get(key, {"count": 0, "task": None, "idle": event_idle(item, "craft", SHORT_IDLE_SECONDS)})
+    st["count"] += count
+    idle = st["idle"]
+    if st.get("task") and not st["task"].done():
+        st["task"].cancel()
+    async def _flush():
+            try:
+                await asyncio.sleep(idle)
+                total = st["count"]
+                CRAFT_BATCH.pop(key, None)
+                meta = {
+                    "event": "craft_batch",
+                    "player": player,
+                    "item": item,
+                    "item_name": item_nice(item),
+                    "count": total,
+                    "value": total * item_value(item)
+                }
+                await _emit_meta(meta)
+            except asyncio.CancelledError:
+                pass
+    st["task"] = asyncio.create_task(_flush())
+    CRAFT_BATCH[key] = st
+    return None
+
+def on_effect_apply(idx: int, ev: dict):
+    if ev.get("type") != "effect_apply":
+        return None
+    player = ev.get("player")
+    eff = ev.get("effect_id")
+    amp = ev.get("amplifier")
+    dur = ev.get("duration")
+    if not player or not eff:
+        return None
+    key = (player, eff)
+    t = EFFECT_PENDING.pop(key, None)
+    if t and not t.done():
+        t.cancel()
+    async def _fire():
+        try:
+            await asyncio.sleep(0.75)
+            meta = {
+                "event": "effect_apply",
+                "player": player,
+                "effect_id": eff,
+                "amplifier": amp,
+                "duration": dur
+            }
+            await _emit_meta(meta)
+        except asyncio.CancelledError:
+            pass
+    EFFECT_PENDING[key] = asyncio.create_task(_fire())
+    return None
+
+def on_advancement(idx: int, ev: dict):
+    if ev.get("type") != "advancement":
+        return None
+    return {
+        "event": "advancement",
+        "player": ev.get("player"),
+        "id": ev.get("id"),
+        "title": ev.get("advancement"),
+        "desc": ev.get("description")
+    }
+
 def on_chat_message(idx: int, ev: dict):
     """
     Respond to player chat. Basic cooldown per player to avoid spam.
@@ -884,9 +1287,9 @@ def on_player_hurt(idx: int, ev: dict):
     total = HIT_TOTALS[src]
     if total >= NEXT_ALERT[src]:
         meta = {
-            "event":    "struggling",
+            "event": "struggling",
             "attacker": src,
-            "hits":     total
+            "hits": total
         }
         NEXT_ALERT[src] *= 2
         return meta
@@ -901,6 +1304,8 @@ def on_player_death(idx: int, ev: dict):
         return None
     cause = ev.get("cause", "unknown")
     player_id = ev.get("player")
+    if player_id:
+        cancel_health_low_for(player_id)
     ts = ev.get("timestamp", time.time())
     sess = HIT_SESSIONS.get(cause)
     stats = ATTACKER_STATS[cause]
@@ -977,7 +1382,7 @@ def on_special_item_pickup(idx: int, ev: dict):
     SPECIAL_PICKUP_STATE[item] = 0
     return {
         "event": "item_collected",
-        "item": item,
+        "item": item_nice(item),
         "category": cfg["category"],
         "threshold": cfg["threshold"]
     }
@@ -1015,13 +1420,24 @@ async def process_event(idx: int, ts: float, ev: dict):
     Process a single event and trigger appropriate handlers.
     This function is called for every event received.
     """
-    for fn in (on_block_break, 
-               on_item_pickup, 
-               on_friendly_hit, 
-               on_player_hurt, 
-               on_player_death, 
-               on_chat_message, 
-               on_special_item_pickup):
+    for fn in (        
+        on_player_death,
+        on_entity_kill,
+        on_health_low,
+        on_villager_trade,
+        on_smelt_complete,
+        on_item_drop,
+        on_effect_apply,
+        on_item_craft,
+        on_potion_brew,
+        on_advancement,
+        on_block_break,
+        on_item_pickup,
+        on_friendly_hit,
+        on_player_hurt,
+        on_chat_message,
+        on_special_item_pickup,
+        ):
         meta = fn(idx, ev)
         if meta:
             print(f"[Analyzer] {fn.__name__} emitted meta: {meta}")
