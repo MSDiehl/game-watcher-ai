@@ -97,7 +97,14 @@ SMELT_BATCH = {}
 BREW_BATCH = {}
 TRADE_BATCH = {}
 DROP_BATCH = {}
-CRAFT_BATCH = {}
+# Replace old per-(player,item) craft batching with player-level rollups
+CRAFT_ROLLUP = defaultdict(lambda: {
+    "items": Counter(),   # item_id -> count
+    "value": 0,           # sum of item_value * count (known items only)
+    "task": None,
+    "idle": SHORT_IDLE_SECONDS,
+})
+
 HEALTH_LOW_PENDING = {}
 EFFECT_PENDING = {}
 
@@ -108,7 +115,6 @@ PRICE_TABLE = {
     "minecraft:diamond": 8,
     "minecraft:netherite_ingot": 24,
 }
-
 
 #Friendly fire config
 FRIENDLY_ANIMALS = {
@@ -239,7 +245,10 @@ async def _embed_later(text: str, details: dict, now: float):
     embedding = embedding.tolist()
     await asyncio.to_thread(
         collection.add,
-        [text], [str(now)], [embedding], [safe_meta]
+        ids=[f"{now:.3f}"],
+        documents=[text],
+        embeddings=[embedding],
+        metadatas=[safe_meta],
     )
 
 def summarize_memory(limit: int = 5) -> str:
@@ -278,6 +287,7 @@ def summarize_memory(limit: int = 5) -> str:
     summary = "\n".join(f"- {l}" for l in lines) if lines else "- Nothing memorable yet."
     print(f"[Memory] Summary:\n{summary}")
     return summary
+
 # ------------------------------------------------------------------------------
 # TTS Budget
 # ------------------------------------------------------------------------------
@@ -298,12 +308,12 @@ def chars_for_seconds(seconds: float, tts_speed=0.92):
 
 # Map base budgets by event (tweak to taste)
 _EVENT_BASE = {
-    "chat_message": (110, 4),   # (tokens, seconds)
-    "item_collected": (110, 4),
-    "friendly_fire": (140, 6),
-    "struggling": (200, 8),
-    "death": (200, 8),
-    "boss_spawn": (220, 10),
+    "chat_message": (200, 6),   # (tokens, seconds)
+    "item_collected": (200, 6),
+    "friendly_fire": (300, 10),
+    "struggling": (500, 15),
+    "death": (500, 15),
+    "boss_spawn": (600, 18),
 }
 _DEFAULT_BASE = (180, 6)
 
@@ -334,7 +344,6 @@ def decide_speech_budget(event_type: str, player_id: str,
     if (noteworthy or high_tilt) and allow_long(player_id, event_type, now):
         tok = max(tok, int(240 * mult))
         secs = max(secs, 10.0 * mult)
-    tok = min(tok, 320)
     secs = min(secs, 15.0)
     max_chars = chars_for_seconds(secs)
     return tok, max_chars
@@ -836,6 +845,8 @@ async def _call_ai_and_tts(meta: dict):
     event_type = meta.get("event")
     player_id = meta.get("player")
     max_tokens, max_chars = decide_speech_budget(event_type, player_id)
+    target_tokens = int((max_chars / 4.0) * 1.35)  # ~35% headroom
+    model_max_tokens = max(128, target_tokens)  
     context_event = meta.get("context_event", {})
     print(f"[AI] Processing context_event: {context_event}")
     tilt_value = TILT_STATE.get(player_id, 0)
@@ -844,12 +855,13 @@ async def _call_ai_and_tts(meta: dict):
     memory_summary = summarize_memory()
     system_prompt = (
         "You are a sarcastic, very annoyed Minecraft coach who adjusts tone based on context: annoyed/fake-supportive for good or routine events, furious/angry for repeated mistakes or harm.  \n"
-        "Always say “you” (never the username).  \n"
+        "Always say “you” (never the username of the player).  \n"
         "Profanity allowed (FUCK, SHIT, DAMN).  \n"
         "Use ALL-CAPS, !!!, …, and — for emphasis;  \n"
         "First sentence must be short (≤ 12 words). Then continue.  \n"
     )
     system_prompt += f"Current rage level (0 calm - {MAX_TILT} max rage): {tilt_value}. Adjust your tone accordingly.\n"
+    system_prompt += f"Keep it concise: about {max_chars} characters total, ending cleanly.\n"
     user_prompt = (        
         f"MEMORY SUMMARY:\n{memory_summary}\n\n"
         f"NEW EVENT: {current}\n\n"
@@ -871,12 +883,13 @@ async def _call_ai_and_tts(meta: dict):
         base_iter = openai_sentence_stream(
             messages,
             model="gpt-4o-mini",
-            max_tokens=max_tokens,
+            max_tokens=model_max_tokens,
             temperature=0.65,
             first_min_chars=20, first_max_chars=85,
             rest_min_chars=90,  rest_max_chars=180,
         )
         async for piece in soft_cap_stream(base_iter, hard_cap_chars=max_chars, overflow_chars=160):
+            print(f"[AI] piece (+{len(piece)} chars): {piece}")
             yield piece
     await tts_ws_stream(_text_iter())
     print("[TTS] Streamed audio (WS).")
@@ -899,7 +912,7 @@ async def _emit_meta(meta: dict):
         meta["screenshot_s3_key"] = key
     if LAST_PLAYER_STATE is not None:
         meta["context_event"] = LAST_PLAYER_STATE
-    await enqueue_meta(meta)
+    await maybe_enqueue(meta)
     record_memory(meta.get("event", "meta"), **meta)
 
 def on_health_low(idx: int, ev: dict):
@@ -915,7 +928,7 @@ def on_health_low(idx: int, ev: dict):
     async def _fire():
         try:
             await asyncio.sleep(1.0)
-            meta = {"event": "health_low", "player": player, "health": hp}
+            meta = {"event": "health_low", "health": hp}
             await _emit_meta(meta)
         except asyncio.CancelledError:
             pass
@@ -932,7 +945,6 @@ def on_entity_kill(idx: int, ev: dict):
         return None
     return {
         "event": "entity_kill",
-        "player": ev.get("player"),
         "entity_type": ev.get("entity_type"),
     }
 
@@ -953,7 +965,6 @@ def on_smelt_complete(idx: int, ev: dict):
             value = total * item_value(item)
             meta = {
                 "event": "smelt_batch",
-                "player": player,
                 "item": item,
                 "item_name": item_nice(item),
                 "count": total,
@@ -1129,7 +1140,6 @@ def on_villager_trade(idx: int, ev: dict):
                         emeralds_spent += int(b.get("count", 0))
             meta = {
                 "event": "trade_batch",
-                "player": player,
                 "dimension": dim,
                 "villager_pos": pos,
                 "villager_profession": st.get("profession"),
@@ -1187,32 +1197,45 @@ def on_item_craft(idx: int, ev: dict):
     player = ev.get("player")
     item = ev.get("item")
     count = int(ev.get("count", 1))
-    if not player or not item:
+    if not player or not item or count <= 0:
         return None
-    key = (player, item)
-    st = CRAFT_BATCH.get(key, {"count": 0, "task": None, "idle": event_idle(item, "craft", SHORT_IDLE_SECONDS)})
-    st["count"] += count
-    idle = st["idle"]
+    st = CRAFT_ROLLUP[player]
+    st["items"][item] += count
+    if item in ITEMS_CONFIG:
+        st["value"] += item_value(item) * count
+    idle = st.get("idle", SHORT_IDLE_SECONDS)
     if st.get("task") and not st["task"].done():
         st["task"].cancel()
     async def _flush():
-            try:
-                await asyncio.sleep(idle)
-                total = st["count"]
-                CRAFT_BATCH.pop(key, None)
-                meta = {
-                    "event": "craft_batch",
-                    "player": player,
-                    "item": item,
-                    "item_name": item_nice(item),
-                    "count": total,
-                    "value": total * item_value(item)
-                }
-                await _emit_meta(meta)
-            except asyncio.CancelledError:
-                pass
+        try:
+            await asyncio.sleep(idle)
+            items = st["items"]
+            total_items = sum(items.values())
+            total_value = st["value"]
+            summary = []
+            for it, cnt in items.items():
+                if it in ITEMS_CONFIG:
+                    summary.append({
+                        "item": it,
+                        "item_name": item_nice(it),
+                        "count": int(cnt),
+                        "value": int(item_value(it) * cnt),
+                        "category": ITEMS_CONFIG[it].get("category")
+                    })
+            CRAFT_ROLLUP.pop(player, None)
+            if not summary:
+                return
+            meta = {
+                "event": "craft_rollup",
+                "items": sorted(summary, key=lambda x: (-(x["value"]), x["item"])),
+                "total_items": int(total_items),
+                "total_value": int(total_value),
+            }
+            await _emit_meta(meta)
+        except asyncio.CancelledError:
+            pass
     st["task"] = asyncio.create_task(_flush())
-    CRAFT_BATCH[key] = st
+    CRAFT_ROLLUP[player] = st
     return None
 
 def on_effect_apply(idx: int, ev: dict):
@@ -1233,7 +1256,6 @@ def on_effect_apply(idx: int, ev: dict):
             await asyncio.sleep(0.75)
             meta = {
                 "event": "effect_apply",
-                "player": player,
                 "effect_id": eff,
                 "amplifier": amp,
                 "duration": dur
@@ -1270,7 +1292,6 @@ def on_chat_message(idx: int, ev: dict):
     LAST_CHAT_REPLY[player] = now
     return {
         "event": "player_chat",
-        "player": player,
         "message": msg
     }
 
@@ -1412,6 +1433,152 @@ def on_friendly_hit(idx: int, ev: dict):
         "entity": ent
     }
 
+# ----------------------------------------------------------------------
+# Notability gate: decide if an event is worth speaking about
+# ----------------------------------------------------------------------
+SPEAK_STATE = defaultdict(lambda: {
+    "last_spoke_global": 0.0,
+})
+ITEM_STATE = defaultdict(lambda: {
+    "last_spoke": 0.0,
+    "rolling": deque(),
+    "total_since_spoke": 0,
+})
+
+ALWAYS_NOTABLE = {
+    "death", "hit_and_die", "struggling", "advancement",
+    "health_low", "friendly_fire", "boss_spawn", "player_chat"
+}
+
+SPEAK_MIN_GAP = 12.0
+ITEM_MIN_GAP = 30.0
+ROLLING_WINDOW = 120.0
+BIG_BATCH = 32
+VALUE_POP = 8
+
+def _now():
+    return time.time()
+
+def _purge_old(dq: deque, now: float, window: float = ROLLING_WINDOW):
+    while dq and (now - dq[0][0]) > window:
+        dq.popleft()
+
+def _item_key(meta: dict) -> str:
+    ev = meta.get("event", "")
+    it = meta.get("item") or meta.get("ore") or meta.get("effect_id") or meta.get("attacker") or ""
+    return f"{ev}:{it}"
+
+def _category_boost(item_id: str) -> int:
+    cfg = ITEMS_CONFIG.get(item_id, {})
+    cat = cfg.get("category", "")
+    return {
+        "rare": 8, "quest": 6, "combat": 5, "valuable": 4,
+        "mobility": 3, "utility": 2, "ammo": 2, "food": 1, "trash": 0
+    }.get(cat, 1)
+
+def _score(meta: dict, now: float) -> float:
+    """Compute a notability score. >= 1.0 → speak."""
+    ev = meta.get("event", "")
+    if ev in ALWAYS_NOTABLE:
+        return 999.0
+    if ev in ("smelt_batch", "drop_batch", "trade_batch", "brew_batch"):
+        item = meta.get("item")
+        if not item or item not in ITEMS_CONFIG:
+            return -999.0
+    last_global = SPEAK_STATE["*"]["last_spoke_global"]
+    global_penalty = 0.0 if (now - last_global) >= SPEAK_MIN_GAP else -1.0
+    score = 0.0 + global_penalty
+    if ev in ("smelt_batch", "drop_batch", "trade_batch", "brew_batch"):
+        item = meta.get("item")
+        count = int(meta.get("count", meta.get("total_bottles", meta.get("total_trades", 1))))
+        value = int(meta.get("value", count * item_value(item) if item else 0))
+        key = _item_key(meta)
+        st = ITEM_STATE[key]
+        _purge_old(st["rolling"], now)
+        st["rolling"].append((now, count))
+        st["total_since_spoke"] += count
+        if item:
+            score += _category_boost(item)
+        if value >= VALUE_POP:
+            score += 1.0
+        threshold = ITEMS_CONFIG.get(item, {}).get("threshold", BIG_BATCH) if item else BIG_BATCH
+        if st["total_since_spoke"] >= threshold:
+            score += 2.0
+        if (now - st["last_spoke"]) >= ITEM_MIN_GAP:
+            score += 0.6
+        if st["rolling"]:
+            recent_total = sum(c for _, c in st["rolling"])
+            recent_avg = recent_total / max(1, len(st["rolling"]))
+            if count >= max(8, 2 * recent_avg):
+                score += 1.2
+        if (now - st["last_spoke"]) < 10.0:
+            score -= 1.5
+        if item and ITEMS_CONFIG.get(item, {}).get("category") in ("trash",):
+            if st["total_since_spoke"] < (2 * threshold):
+                score -= 0.8
+    elif ev == "craft_rollup":
+        items = meta.get("items", [])
+        if not items:
+            return -999.0
+        total_value = int(meta.get("total_value", 0))
+        max_cat_boost = 0
+        threshold_hit = False
+        notable_rare = False
+        for entry in items:
+            it = entry.get("item")
+            cnt = int(entry.get("count", 0))
+            cfg = ITEMS_CONFIG.get(it)
+            if not cfg:
+                continue
+            max_cat_boost = max(max_cat_boost, _category_boost(it))
+            thr = int(cfg.get("threshold", BIG_BATCH))
+            if cnt >= thr:
+                threshold_hit = True
+            if cfg.get("category") in ("rare", "quest"):
+                notable_rare = True
+        if max_cat_boost >= 5:
+            score += 0.8
+        if total_value >= (VALUE_POP * 2):
+            score += 0.8
+        if threshold_hit:
+            score += 1.4
+        if notable_rare:
+            score += 1.0
+        key = "craft_rollup"
+        st = ITEM_STATE[key]
+        if (now - st["last_spoke"]) >= ITEM_MIN_GAP:
+            score += 0.6
+        else:
+            score -= 1.2
+        last_global = SPEAK_STATE["*"]["last_spoke_global"]
+        if (now - last_global) < SPEAK_MIN_GAP:
+            score -= 1.0
+    elif ev == "effect_apply":
+        amp = int(meta.get("amplifier", 0))
+        dur = int(meta.get("duration", 0))
+        if amp >= 1 or dur >= 45 * 20:   # >= 45s in ticks
+            score += 1.2
+    elif ev == "entity_kill":
+        score += 0.5
+    return score
+
+async def maybe_enqueue(meta: dict) -> bool:
+    """
+    Decide if this meta should lead to speech. Returns True if enqueued.
+    """
+    now = _now()
+    ev = meta.get("event", "")
+    key = _item_key(meta)
+    score = _score(meta, now)
+    if score >= 1.0:
+        SPEAK_STATE["*"]["last_spoke_global"] = now
+        if key:
+            ITEM_STATE[key]["last_spoke"] = now
+            ITEM_STATE[key]["total_since_spoke"] = 0
+        await enqueue_meta(meta)
+        return True
+    return False
+
 # ------------------------------------------------------------------------------
 # Event Processing and Session Management
 # ------------------------------------------------------------------------------
@@ -1447,7 +1614,7 @@ async def process_event(idx: int, ts: float, ev: dict):
                 meta["screenshot_s3_key"] = key
             if LAST_PLAYER_STATE is not None:
                 meta["context_event"] = LAST_PLAYER_STATE
-            await enqueue_meta(meta)
+            await maybe_enqueue(meta)
             record_memory(fn.__name__, **meta)
 
 async def session_flusher():
@@ -1475,7 +1642,7 @@ async def session_flusher():
                 if url and key:
                     meta["screenshot_url"] = url
                     meta["screenshot_s3_key"] = key
-                await enqueue_meta(meta)
+                await maybe_enqueue(meta)
                 record_memory(meta["event"], **meta)
                 del SESSIONS[ore]
         for attacker, sess in list(HIT_SESSIONS.items()):
@@ -1499,7 +1666,7 @@ async def session_flusher():
                     if url and key:
                         meta["screenshot_url"] = url
                         meta["screenshot_s3_key"] = key
-                    await enqueue_meta(meta)
+                    await maybe_enqueue(meta)
                     record_memory("struggling", **meta)
         await asyncio.sleep(0.5)
 
