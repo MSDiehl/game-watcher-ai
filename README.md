@@ -1,3 +1,23 @@
 # game-watcher-ai
-This AI is going to be specifically tailored to watching gameplay and making comments on it using OpenAI api and Elvenlabs. This is currently trying to make for all games but moved on to make a more minecraft specific one.
-You currently need to set up your own API key for ElevenLabs and OpenAI, if you don't have access to a visual model in OpenAI then this will not work.
+This AI is tailored to watching Minecraft gameplay and making live commentary with OpenAI for both text generation and TTS.
+
+Required env vars:
+- `OPENAI_API_KEY`
+
+Optional tuning env vars:
+- `OPENAI_CHAT_MODEL` (default: `gpt-4o-mini`)
+- `OPENAI_TTS_MODEL` (default: `gpt-4o-mini-tts`)
+- `OPENAI_TTS_VOICE` (default: `alloy`)
+- `OPENAI_TTS_FORMAT` (recommended: `wav`)
+- `OPENAI_TTS_SPEED` (default: `1.0`)
+- `GW_ENABLE_SCREENSHOTS` (`1`/`0`, default off)
+- `GW_SCREENSHOT_EVENTS` (comma-separated notable events)
+- `GW_MAX_EVENT_LOG` (default: `2000`)
+
+Code layout:
+- `server.py`: FastAPI entrypoint and routing only.
+- `gw_state.py`: runtime config, shared mutable state, and item helpers.
+- `gw_memory.py`: memory compaction, embedding, and memory summaries.
+- `gw_media.py`: screenshot capture and S3 cleanup.
+- `gw_ai.py`: OpenAI text generation + TTS worker pipeline.
+- `gw_events.py`: event handlers, batching, scoring, enqueue logic, and background loops.
